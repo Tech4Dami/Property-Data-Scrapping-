@@ -1,0 +1,914 @@
+## Abuja Datascrapper 
+from bs4 import BeautifulSoup, Comment
+import pandas as pd
+import re
+import time
+from datetime import datetime
+
+# ================= CONFIG =================
+BASE_URL = "https://nigeriapropertycentre.com/for-sale/abuja?page={}"
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+data = []
+
+# ================= HELPERS =================
+
+def extract_price(card):
+    price_tag = card.select("span.price")
+    if len(price_tag) >= 2:
+        value = float(price_tag[1]["content"])
+        return f"₦{value:,.2f}"
+    return None
+
+def extract_location(card):
+    addr = card.find("address")
+    if addr:
+        text = addr.get_text(strip=True)
+        parts = text.split(",")
+        if len(parts) >= 2:
+            return parts[-2].strip().title()  # e.g. Gwarinpa
+    return None
+
+def extract_category_subtype(url):
+    url = url.lower()
+
+    # CATEGORY
+    if "land" in url:
+        category = "Land"
+    elif "commercial" in url:
+        category = "Commercial"
+    elif "shop" in url or "store" in url:
+        category = "Retail"
+    else:
+        category = "Residential"
+
+    # SUB CATEGORY
+    mapping = {
+        "duplex": "Duplex",
+        "detached": "Detached",
+        "semi-detached": "Semi Detached",
+        "terrace": "Terrace",
+        "flat": "Apartment",
+        "apartment": "Apartment",
+        "bungalow": "Bungalow",
+        "land": "Land",
+        "office": "Office",
+        "shop": "Shop",
+        "warehouse": "Warehouse"
+    }
+
+    sub = None
+    for key in mapping:
+        if key in url:
+            sub = mapping[key]
+            break
+
+    return category, sub
+
+def extract_offer(url):
+    url = url.lower()
+    if "for-sale" in url:
+        return "Sale"
+    elif "for-rent" in url:
+        return "Rent"
+    elif "short-let" in url:
+        return "Shortlet"
+    return None
+
+def extract_date(card):
+    comments = card.find_all(string=lambda text: isinstance(text, Comment))
+    for c in comments:
+        if "updated" in c.lower():
+            m = re.search(r'(\d{1,2}\s\w+\s\d{4})', c)
+            if m:
+                dt = datetime.strptime(m.group(1), "%d %b %Y")
+                return dt.strftime("%d/%m/%Y")
+    return None
+
+def extract_features(card):
+    bedrooms = bathrooms = toilets = parking = None
+
+    aux = card.find("ul", class_="aux-info")
+    if aux:
+        for li in aux.find_all("li"):
+            spans = li.find_all("span")
+
+            if len(spans) >= 2:
+                value = spans[0].get_text(strip=True)
+                label = spans[1].get_text(strip=True).lower()
+
+                try:
+                    value = int(value)
+                except:
+                    continue
+
+                if "bed" in label:
+                    bedrooms = value
+                elif "bath" in label:
+                    bathrooms = value
+                elif "toilet" in label:
+                    toilets = value
+                elif "parking" in label:
+                    parking = value
+
+    return bedrooms, bathrooms, toilets, parking
+
+# ================= SCRAPER =================
+
+page = 1
+
+while True:
+    url = BASE_URL.format(page)
+    print(f"Scraping page {page}...")
+
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=30)
+        if res.status_code != 200:
+            break
+    except:
+        break
+
+    soup = BeautifulSoup(res.text, "lxml")
+    cards = soup.find_all("div", class_="wp-block property list")
+
+    # STOP when no listings found
+    if not cards:
+        print("✅ No more pages. Stopping...")
+        break
+
+    print(f"Found {len(cards)} listings")
+
+    for card in cards:
+        try:
+            # ---------- URL ----------
+            link = card.find("a", href=True)
+            full_url = "https://nigeriapropertycentre.com" + link["href"] if link else None
+
+            # ---------- CATEGORY ----------
+            category, subcategory = extract_category_subtype(full_url if full_url else "")
+
+            # ---------- OFFER ----------
+            offer = extract_offer(full_url if full_url else "")
+
+            # ---------- LOCATION ----------
+            location = extract_location(card)
+
+            # ---------- PRICE ----------
+            price = extract_price(card)
+
+            # ---------- FEATURES ----------
+            bedrooms, bathrooms, toilets, parking = extract_features(card)
+
+            # ---------- DATE ----------
+            date_uploaded = extract_date(card)
+
+            data.append({
+                "Date Uploaded": date_uploaded,
+                "Price": price,
+                "Location": location,
+                "Category": category,
+                "Sub Category": subcategory,
+                "Bedrooms": bedrooms,
+                "Bathroom": bathrooms,
+                "Toilet": toilets,
+                "Parking": parking,
+                "Offer": offer
+            })
+
+        except:
+            continue
+
+    page += 1
+    time.sleep(2)
+
+# ================= SAVE =================
+df = pd.DataFrame(data)
+df.to_excel("abuja_property_full.xlsx", index=False)
+
+print(f"\n✅ DONE: {len(df)} listings scraped across {page-1} pages")
+
+
+
+## Port Harcourt 2026 Data Scraping - Lease and Sale
+
+import requests
+from bs4 import BeautifulSoup, Comment
+import pandas as pd
+import re
+import time
+from datetime import datetime
+import os
+import json
+
+# ================= CONFIG =================
+BASE_DOMAIN = "https://nigeriapropertycentre.com"
+BASE_URL = "https://nigeriapropertycentre.com/rivers/port-harcourt?page={}"
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
+
+OUTPUT_FILE = "portharcourt_property_full.xlsx"
+CHECKPOINT_FILE = "portharcourt_checkpoint.json"
+
+CITY = "Port Harcourt"
+SLEEP_TIME = 2
+MAX_PAGES = 2000
+
+data = []
+
+
+# ================= HELPERS =================
+def save_checkpoint(page):
+    with open(CHECKPOINT_FILE, "w") as f:
+        json.dump({"last_completed_page": page}, f)
+
+
+def load_checkpoint():
+    if os.path.exists(CHECKPOINT_FILE):
+        with open(CHECKPOINT_FILE, "r") as f:
+            checkpoint = json.load(f)
+            return checkpoint.get("last_completed_page", 0) + 1
+    return 1
+
+
+def extract_price_and_currency(card):
+    price_tags = card.select("span.price")
+
+    currency = None
+    price = None
+
+    for tag in price_tags:
+        content = tag.get("content")
+
+        if content in ["NGN", "USD", "GBP", "EUR"]:
+            currency = content
+        elif content:
+            try:
+                price = float(content)
+            except:
+                pass
+
+    return currency, price
+
+
+def extract_location(card):
+    addr = card.find("address")
+
+    if not addr:
+        return None, None
+
+    full_address = addr.get_text(" ", strip=True).title()
+    parts = [p.strip().title() for p in full_address.split(",")]
+
+    submarket = None
+
+    if len(parts) >= 2:
+        submarket = parts[-2]
+    elif len(parts) == 1:
+        submarket = parts[0]
+
+    return full_address, submarket
+
+
+def extract_date(card):
+    comments = card.find_all(string=lambda text: isinstance(text, Comment))
+
+    for c in comments:
+        if "updated" in c.lower() or "added" in c.lower():
+            m = re.search(r"(\d{1,2}\s\w+\s\d{4})", c)
+            if m:
+                try:
+                    dt = datetime.strptime(m.group(1), "%d %b %Y")
+                    return dt.strftime("%d-%m-%Y")
+                except:
+                    pass
+
+    text = card.get_text(" ", strip=True)
+    m = re.search(r"(\d{1,2}\s\w+\s\d{4})", text)
+
+    if m:
+        try:
+            dt = datetime.strptime(m.group(1), "%d %b %Y")
+            return dt.strftime("%d-%m-%Y")
+        except:
+            return None
+
+    return None
+
+
+def extract_features(card):
+    bedrooms = bathrooms = toilets = parking = None
+
+    text = card.get_text(" ", strip=True).lower()
+
+    bed = re.search(r"(\d+)\s*bed", text)
+    bath = re.search(r"(\d+)\s*bath", text)
+    toilet = re.search(r"(\d+)\s*toilet", text)
+    park = re.search(r"(\d+)\s*parking", text)
+
+    if bed:
+        bedrooms = int(bed.group(1))
+    if bath:
+        bathrooms = int(bath.group(1))
+    if toilet:
+        toilets = int(toilet.group(1))
+    if park:
+        parking = int(park.group(1))
+
+    return bedrooms, bathrooms, toilets, parking
+
+
+def extract_size_sqm(card):
+    text = card.get_text(" ", strip=True).lower()
+    text = text.replace(",", "")
+
+    patterns = [
+        r"(\d+(\.\d+)?)\s*sqm",
+        r"(\d+(\.\d+)?)\s*sq\.m",
+        r"(\d+(\.\d+)?)\s*sq m",
+        r"(\d+(\.\d+)?)\s*square meters",
+        r"(\d+(\.\d+)?)\s*square metres",
+        r"(\d+(\.\d+)?)\s*m²",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return float(match.group(1))
+
+    return None
+
+
+def extract_title(card):
+    title = card.find(["h3", "h4"])
+    return title.get_text(" ", strip=True) if title else None
+
+
+def extract_full_url(card):
+    link = card.find("a", href=True)
+
+    if not link:
+        return None
+
+    href = link["href"]
+    return BASE_DOMAIN + href if href.startswith("/") else href
+
+
+def extract_offer(url):
+    url = (url or "").lower()
+
+    if "for-sale" in url:
+        return "Sale"
+    elif "for-rent" in url:
+        return "Rent"
+    elif "short-let" in url:
+        return "Shortlet"
+
+    return None
+
+
+def extract_category_subtype(url, title):
+    combined = f"{url or ''} {title or ''}".lower()
+
+    if "short-let" in combined or "short let" in combined:
+        category = "Hospitality"
+    elif "land" in combined:
+        category = "Land"
+    elif "warehouse" in combined or "industrial" in combined:
+        category = "Industrial"
+    elif "office" in combined:
+        category = "Office"
+    elif "shop" in combined or "store" in combined or "retail" in combined:
+        category = "Retail"
+    elif "commercial" in combined:
+        category = "Commercial"
+    else:
+        category = "Residential"
+
+    mapping = {
+        "duplex": "Duplex",
+        "detached": "Detached",
+        "semi-detached": "Semi Detached",
+        "terrace": "Terrace",
+        "flat": "Apartment",
+        "apartment": "Apartment",
+        "bungalow": "Bungalow",
+        "land": "Land",
+        "office": "Office",
+        "shop": "Shop",
+        "store": "Store",
+        "warehouse": "Warehouse",
+        "hotel": "Hotel",
+        "short-let": "Shortlet Apartment"
+    }
+
+    subcategory = None
+
+    for key, value in mapping.items():
+        if key in combined:
+            subcategory = value
+            break
+
+    return category, subcategory
+
+
+def create_sample_asset(category, subcategory, bedrooms, size_sqm):
+    if category == "Residential" and bedrooms:
+        return f"{bedrooms} Bedroom"
+    elif category == "Land" and size_sqm:
+        return f"{int(size_sqm)} SQM Land"
+    elif category == "Land":
+        return "Land"
+    elif category == "Office":
+        return "Office Space"
+    elif category == "Retail":
+        return "Retail Space"
+    elif category == "Industrial":
+        return "Warehouse"
+    elif category == "Hospitality":
+        return "Shortlet Apartment"
+    else:
+        return subcategory
+
+
+# ================= LOAD EXISTING DATA =================
+if os.path.exists(OUTPUT_FILE):
+    df_existing = pd.read_excel(OUTPUT_FILE)
+    data = df_existing.to_dict("records")
+
+    if "URL" in df_existing.columns:
+        scraped_urls = set(df_existing["URL"].dropna().tolist())
+    else:
+        scraped_urls = set()
+
+    print(f"Loaded existing file with {len(data)} records.")
+else:
+    scraped_urls = set()
+
+
+start_page = load_checkpoint()
+print(f"Starting from page {start_page}...")
+
+
+# ================= SCRAPER =================
+for page in range(start_page, MAX_PAGES + 1):
+    url = BASE_URL.format(page)
+    print(f"\nScraping page {page}: {url}")
+
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=30)
+
+        if res.status_code != 200:
+            print(f"Failed page {page}. Status code: {res.status_code}")
+            time.sleep(5)
+            continue
+
+    except Exception as e:
+        print(f"Request failed on page {page}: {e}")
+        time.sleep(5)
+        continue
+
+    soup = BeautifulSoup(res.text, "lxml")
+
+    cards = soup.find_all("div", class_="wp-block property list")
+
+    if not cards:
+        print("No listings found on this page. Continuing in case it is a temporary page issue...")
+        save_checkpoint(page)
+        continue
+
+    print(f"Found {len(cards)} listings")
+
+    new_records = 0
+
+    for card in cards:
+        try:
+            full_url = extract_full_url(card)
+
+            if not full_url or full_url in scraped_urls:
+                continue
+
+            title = extract_title(card)
+            currency, price = extract_price_and_currency(card)
+            location_address, submarket = extract_location(card)
+            date_uploaded = extract_date(card)
+            bedrooms, bathrooms, toilets, parking = extract_features(card)
+            size_sqm = extract_size_sqm(card)
+            offer = extract_offer(full_url)
+
+            category, subcategory = extract_category_subtype(full_url, title)
+            sample_asset = create_sample_asset(category, subcategory, bedrooms, size_sqm)
+
+            price_per_sqm = None
+            if price and size_sqm and size_sqm > 0:
+                price_per_sqm = price / size_sqm
+
+            data.append({
+                "Date Scraped": datetime.today().strftime("%d-%m-%Y"),
+                "Date Uploaded": date_uploaded,
+                "City": CITY,
+                "Submarket": submarket,
+                "Location / Address": location_address,
+                "Category": category,
+                "Sub Category": subcategory,
+                "Sample Asset": sample_asset,
+                "Property Title": title,
+                "Offer": offer,
+                "Currency": currency,
+                "Price": price,
+                "Size SQM": size_sqm,
+                "Price per SQM": price_per_sqm,
+                "Bedrooms": bedrooms,
+                "Bathroom": bathrooms,
+                "Toilet": toilets,
+                "Parking": parking,
+                "URL": full_url
+            })
+
+            scraped_urls.add(full_url)
+            new_records += 1
+
+        except Exception as e:
+            print(f"Skipped one listing: {e}")
+            continue
+
+    df = pd.DataFrame(data)
+    df.to_excel(OUTPUT_FILE, index=False)
+
+    save_checkpoint(page)
+
+    print(f"Saved {len(df)} total records.")
+    print(f"New records from page {page}: {new_records}")
+
+    time.sleep(SLEEP_TIME)
+
+print("\nPort Harcourt scraping complete.")
+
+
+
+## Lagos 2026 datascrapping Lease and sale
+
+import requests
+from bs4 import BeautifulSoup, Comment
+import pandas as pd
+import re
+import time
+from datetime import datetime
+import os
+import json
+
+# ================= CONFIG =================
+BASE_DOMAIN = "https://nigeriapropertycentre.com"
+BASE_URL = "https://nigeriapropertycentre.com/lagos?page={}"
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
+
+OUTPUT_FILE = "lagos_property_full.xlsx"
+CHECKPOINT_FILE = "lagos_checkpoint.json"
+
+CITY = "Lagos"
+SLEEP_TIME = 2
+MAX_PAGES = 7000
+
+data = []
+
+
+# ================= HELPERS =================
+def save_checkpoint(page):
+    with open(CHECKPOINT_FILE, "w") as f:
+        json.dump({"last_completed_page": page}, f)
+
+
+def load_checkpoint():
+    if os.path.exists(CHECKPOINT_FILE):
+        with open(CHECKPOINT_FILE, "r") as f:
+            checkpoint = json.load(f)
+            return checkpoint.get("last_completed_page", 0) + 1
+    return 1
+
+
+def extract_price_and_currency(card):
+    price_tags = card.select("span.price")
+
+    currency = None
+    price = None
+
+    for tag in price_tags:
+        content = tag.get("content")
+
+        if content in ["NGN", "USD", "GBP", "EUR"]:
+            currency = content
+
+        elif content:
+            try:
+                price = float(content)
+            except:
+                pass
+
+    return currency, price
+
+
+def extract_location(card):
+    addr = card.find("address")
+
+    if not addr:
+        return None, None
+
+    full_address = addr.get_text(" ", strip=True).title()
+    parts = [p.strip().title() for p in full_address.split(",")]
+
+    submarket = None
+
+    if len(parts) >= 2:
+        submarket = parts[-2]
+    elif len(parts) == 1:
+        submarket = parts[0]
+
+    return full_address, submarket
+
+
+def extract_date(card):
+    # First attempt: HTML comments
+    comments = card.find_all(string=lambda text: isinstance(text, Comment))
+
+    for c in comments:
+        if "updated" in c.lower() or "added" in c.lower():
+            m = re.search(r"(\d{1,2}\s\w+\s\d{4})", c)
+            if m:
+                try:
+                    dt = datetime.strptime(m.group(1), "%d %b %Y")
+                    return dt.strftime("%d-%m-%Y")
+                except:
+                    pass
+
+    # Second attempt: visible text
+    text = card.get_text(" ", strip=True)
+    m = re.search(r"(\d{1,2}\s\w+\s\d{4})", text)
+
+    if m:
+        try:
+            dt = datetime.strptime(m.group(1), "%d %b %Y")
+            return dt.strftime("%d-%m-%Y")
+        except:
+            return None
+
+    return None
+
+
+def extract_features(card):
+    bedrooms = bathrooms = toilets = parking = None
+
+    text = card.get_text(" ", strip=True).lower()
+
+    bed = re.search(r"(\d+)\s*bed", text)
+    bath = re.search(r"(\d+)\s*bath", text)
+    toilet = re.search(r"(\d+)\s*toilet", text)
+    park = re.search(r"(\d+)\s*parking", text)
+
+    if bed:
+        bedrooms = int(bed.group(1))
+    if bath:
+        bathrooms = int(bath.group(1))
+    if toilet:
+        toilets = int(toilet.group(1))
+    if park:
+        parking = int(park.group(1))
+
+    return bedrooms, bathrooms, toilets, parking
+
+
+def extract_size_sqm(card):
+    text = card.get_text(" ", strip=True).lower()
+    text = text.replace(",", "")
+
+    patterns = [
+        r"(\d+(\.\d+)?)\s*sqm",
+        r"(\d+(\.\d+)?)\s*sq\.m",
+        r"(\d+(\.\d+)?)\s*square meters",
+        r"(\d+(\.\d+)?)\s*square metres",
+        r"(\d+(\.\d+)?)\s*m²",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return float(match.group(1))
+
+    return None
+
+
+def extract_title(card):
+    title = card.find(["h3", "h4"])
+
+    if title:
+        return title.get_text(" ", strip=True)
+
+    return None
+
+
+def extract_full_url(card):
+    link = card.find("a", href=True)
+
+    if not link:
+        return None
+
+    href = link["href"]
+
+    if href.startswith("/"):
+        return BASE_DOMAIN + href
+
+    return href
+
+
+def extract_offer(url):
+    url = (url or "").lower()
+
+    if "for-sale" in url:
+        return "Sale"
+    elif "for-rent" in url:
+        return "Rent"
+    elif "short-let" in url:
+        return "Shortlet"
+
+    return None
+
+
+def extract_category_subtype(url, title):
+    combined = f"{url or ''} {title or ''}".lower()
+
+    if "short-let" in combined or "short let" in combined:
+        category = "Hospitality"
+    elif "land" in combined:
+        category = "Land"
+    elif "warehouse" in combined or "industrial" in combined:
+        category = "Industrial"
+    elif "office" in combined:
+        category = "Office"
+    elif "shop" in combined or "store" in combined or "retail" in combined:
+        category = "Retail"
+    elif "commercial" in combined:
+        category = "Commercial"
+    else:
+        category = "Residential"
+
+    mapping = {
+        "duplex": "Duplex",
+        "detached": "Detached",
+        "semi-detached": "Semi Detached",
+        "terrace": "Terrace",
+        "flat": "Apartment",
+        "apartment": "Apartment",
+        "bungalow": "Bungalow",
+        "land": "Land",
+        "office": "Office",
+        "shop": "Shop",
+        "store": "Store",
+        "warehouse": "Warehouse",
+        "hotel": "Hotel",
+        "short-let": "Shortlet Apartment"
+    }
+
+    subcategory = None
+
+    for key, value in mapping.items():
+        if key in combined:
+            subcategory = value
+            break
+
+    return category, subcategory
+
+
+def create_sample_asset(category, subcategory, bedrooms, size_sqm):
+    if category == "Residential" and bedrooms:
+        return f"{bedrooms} Bedroom"
+    elif category == "Land" and size_sqm:
+        return f"{int(size_sqm)} SQM Land"
+    elif category == "Land":
+        return "Land"
+    elif category == "Office":
+        return "Office Space"
+    elif category == "Retail":
+        return "Retail Space"
+    elif category == "Industrial":
+        return "Warehouse"
+    elif category == "Hospitality":
+        return "Shortlet Apartment"
+    else:
+        return subcategory
+
+
+# ================= LOAD EXISTING DATA =================
+if os.path.exists(OUTPUT_FILE):
+    df_existing = pd.read_excel(OUTPUT_FILE)
+    data = df_existing.to_dict("records")
+
+    if "URL" in df_existing.columns:
+        scraped_urls = set(df_existing["URL"].dropna().tolist())
+    else:
+        scraped_urls = set()
+
+    print(f"Loaded existing file with {len(data)} records.")
+else:
+    scraped_urls = set()
+
+
+start_page = load_checkpoint()
+print(f"Starting from page {start_page}...")
+
+
+# ================= SCRAPER =================
+for page in range(start_page, MAX_PAGES + 1):
+    url = BASE_URL.format(page)
+    print(f"\nScraping page {page}: {url}")
+
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=30)
+
+        if res.status_code != 200:
+            print(f"Failed page {page}. Status code: {res.status_code}")
+            time.sleep(5)
+            continue
+
+    except Exception as e:
+        print(f"Request failed on page {page}: {e}")
+        time.sleep(5)
+        continue
+
+    soup = BeautifulSoup(res.text, "lxml")
+
+    cards = soup.find_all("div", class_="wp-block property list")
+
+    if not cards:
+        print("No listings found on this page. Continuing in case it is a temporary page issue...")
+        save_checkpoint(page)
+        continue
+
+    print(f"Found {len(cards)} listings")
+
+    new_records = 0
+
+    for card in cards:
+        try:
+            full_url = extract_full_url(card)
+
+            if not full_url or full_url in scraped_urls:
+                continue
+
+            title = extract_title(card)
+            currency, price = extract_price_and_currency(card)
+            location_address, submarket = extract_location(card)
+            date_uploaded = extract_date(card)
+            bedrooms, bathrooms, toilets, parking = extract_features(card)
+            size_sqm = extract_size_sqm(card)
+            offer = extract_offer(full_url)
+
+            category, subcategory = extract_category_subtype(full_url, title)
+            sample_asset = create_sample_asset(category, subcategory, bedrooms, size_sqm)
+
+            price_per_sqm = None
+            if price and size_sqm and size_sqm > 0:
+                price_per_sqm = price / size_sqm
+
+            data.append({
+                "Date Scraped": datetime.today().strftime("%d-%m-%Y"),
+                "Date Uploaded": date_uploaded,
+                "City": CITY,
+                "Submarket": submarket,
+                "Location / Address": location_address,
+                "Category": category,
+                "Sub Category": subcategory,
+                "Sample Asset": sample_asset,
+                "Property Title": title,
+                "Offer": offer,
+                "Currency": currency,
+                "Price": price,
+                "Size SQM": size_sqm,
+                "Price per SQM": price_per_sqm,
+                "Bedrooms": bedrooms,
+                "Bathroom": bathrooms,
+                "Toilet": toilets,
+                "Parking": parking,
+                "URL": full_url
+            })
+
+            scraped_urls.add(full_url)
+            new_records += 1
+
+        except Exception as e:
+            print(f"Skipped one listing: {e}")
+            continue
+
+    df = pd.DataFrame(data)
+    df.to_excel(OUTPUT_FILE, index=False)
+
+    save_checkpoint(page)
+
+    print(f"Saved {len(df)} total records.")
+    print(f"New records from page {page}: {new_records}")
+
+    time.sleep(SLEEP_TIME)
+
+print("\nScraping complete.")
