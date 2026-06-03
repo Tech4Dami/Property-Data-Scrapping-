@@ -1,4 +1,4 @@
-# 🏡 Nigeria Property Market Data Pipeline & Pricing Intelligence System
+#  Nigeria Property Market Data Pipeline & Pricing Intelligence System
 
 ##  Project Overview
 
@@ -28,7 +28,7 @@ The final dataset is designed to support a real estate analytics platform that h
 
 ##  Tech Stack
 
-- Python 🐍
+- Python 
 - BeautifulSoup (Web Scraping)
 - Requests (HTTP handling)
 - Pandas (Data processing & structuring)
